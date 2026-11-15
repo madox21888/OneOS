@@ -13,7 +13,7 @@ encryption, or a credential the keystore knows. A restart of the phone goes back
 which has no lock, and root there reaches the guest's data and can remove the record (that is
 also the way out of a forgotten lock: delete oneos_guest_lock* in the guest's data/system).
 
-Seven changes, all or none:
+Six changes, all or none:
 
 1. LockSettingsService.setLockCredentialInternal: in front of the gatekeeper guard, the added
    method oneosGuestLockSet asks OneOSGuestLock.change() for user 0. Done -> true (the public
@@ -22,12 +22,13 @@ Seven changes, all or none:
 2. LockSettingsService.doVerifyCredential: at the entry, the added method oneosGuestLockVerify
    asks OneOSGuestLock.verify() for user 0. No guest lock -> the method goes its own way. A
    match -> the progress callback (AOSP's lock screen opens on it, not on the result), strong
-   auth reported, listeners told, and VerifyCredentialResponse holding OneOSGuestLock.HANDLE, the
-   guest lock's gatekeeper-password handle (never a password or token of the phone's gatekeeper,
-   whatever the flags), so Settings can ask for a token to enroll a face; nothing of the
-   framework's own unlock (keystore, CE storage, recoverable keystore) is touched. A wrong guess ->
-   credIncorrect(wait), a guess during a wait -> fromTimeout(left), as the framework's own
-   software rate limiter answers; with a wait, strong auth "after lockout" is required as there.
+   auth reported, listeners told, VerifyCredentialResponse.OK: never a gatekeeper handle or
+   token, whatever the flags, and nothing of the framework's own unlock (keystore, CE storage,
+   recoverable keystore). Without a handle Settings cannot start a biometric enrollment, which
+   is the fork's rule: fingerprint and face are enrolled in One UI only, and the guest unlocks
+   with One UI's enrollments through the phone's own HALs. A wrong guess -> credIncorrect(wait),
+   a guess during a wait -> fromTimeout(left), as the framework's own software rate limiter
+   answers; with a wait, strong auth "after lockout" is required as there.
 3. LockSettingsService.getCredentialType (the public binder method only): the guest lock's type
    when one is set. The lock screen, Settings, WindowManager and TrustManager read it through
    LockPatternUtils; getCredentialTypeInternal and with it the service's own state (synthetic
@@ -46,22 +47,22 @@ Seven changes, all or none:
    token, which the guest lock cannot give (ColorOS SystemUI throws on the missing token). So
    such prompts answer what they answer today, without a lock: no credential enrolled. A
    constant on the register, because classes.dex has no room for a new method reference.
-7. LockSettingsService.verifyGatekeeperPasswordHandle: the handle of change 2 is answered with
-   the token OneOSGuestLock.hat() makes (null for any other handle, or no lock: the framework
-   answers that call itself). Settings asks for exactly that token after the credential prompt
-   (BiometricUtils.requestGatekeeperHat) and hands it to the biometric enrollment; the phone's
-   gatekeeper is not asked, and the guest's face HAL ignores it.
 
 Apps therefore see a secure, lockable device (KeyguardManager), but nothing that needs the
 keystore's idea of the user's credential: keys bound to user authentication cannot be made, as
 in every guest so far.
 
+verifyGatekeeperPasswordHandle is not hooked: an earlier version of this patch answered a handle
+of its own there with a token for the guest's biometric enrollment, against that rule. A tree
+patched by that version is an error here (OLD_TOKEN): build it again from the image's own jar.
+
 The patch needs the framework shape it was written for (ColorOS 17 on Android 17: the method
 names above, Duration-based VerifyCredentialResponse, the gatekeeper guard in place). Any other
 shape is left alone: a note on stderr, nothing on stdout, exit 0, so make-overlays.sh (set -e)
 still builds that image without the lock. A tree that already has the lock is left alone the
-same way; one that has parts of it is an error. Calls into OneOSGuestLock sit in try/catch
-Throwable: a helper class that cannot be loaded must not take system_server down.
+same way; one that has parts of it, or the token of the earlier version, is an error. Calls
+into OneOSGuestLock sit in try/catch Throwable: a helper class that cannot be loaded must not
+take system_server down.
 
 Usage: guest_local_lock.py <smali root dir> [helper smali]
 Prints the smali_* directories (dex files) it changed, one per line.
@@ -83,7 +84,6 @@ AUTH = "Lcom/android/server/locksettings/LockSettingsStrongAuth;"
 HELPER = "Lcom/android/server/locksettings/OneOSGuestLock;"
 CRED = "Lcom/android/internal/widget/LockscreenCredential;"
 VCR = "Lcom/android/internal/widget/VerifyCredentialResponse;"
-BUILDER = "Lcom/android/internal/widget/VerifyCredentialResponse$Builder;"
 CALLBACK = "Lcom/android/internal/widget/ICheckCredentialProgressCallback;"
 DURATION = "Ljava/time/Duration;"
 SLOG = "Landroid/util/Slog;"
@@ -92,6 +92,11 @@ SLOG = "Landroid/util/Slog;"
 MARK = "oneosGuestLockVerify"
 KEYSTORE_TEXT = "OneOS: the guest lock state is not sent to the keystore of the phone"
 GUARD_TEXT = '"OneOS: the screen lock is the phone'
+# What a tree patched by the earlier version shows: its handle in oneosGuestLockVerify, its
+# call into the helper in verifyGatekeeperPasswordHandle, and the helper's token method. Such a
+# tree gets no second patch; it is reported.
+OLD_TOKEN = ["0x4f4e454f53L", HELPER + "->hat(JI)[B"]
+OLD_HELPER_TOKEN = ".method public static hat(JI)[B"
 
 # Framework members the added code calls: this image's lock service uses them itself.
 FRAMEWORK_REFS = [
@@ -226,33 +231,6 @@ def type_hook(result, spare):
 
     goto :oneos_gl_type_done""".split("\n")
     return front, back
-
-
-GK_HOOK = f"""\
-    # OneOS: the handle a matched guest credential hands out has no gatekeeper password of the
-    # phone behind it; answer it with the token the enrollment only carries along, and leave
-    # every other handle to the framework (patches/guest_local_lock.py).
-    invoke-static {{p1, p2, p5}}, {HELPER}->hat(JI)[B
-
-    move-result-object v0
-
-    if-eqz v0, :oneos_gl_gk_native
-
-    new-instance v1, {BUILDER}
-
-    invoke-direct {{v1}}, {BUILDER}-><init>()V
-
-    invoke-virtual {{v1, v0}}, {BUILDER}->setGatekeeperHAT([B){BUILDER}
-
-    move-result-object v1
-
-    invoke-virtual {{v1}}, {BUILDER}->build(){VCR}
-
-    move-result-object v1
-
-    return-object v1
-
-    :oneos_gl_gk_native""".split("\n")
 
 
 FRP_HOOK = """\
@@ -444,21 +422,9 @@ def added_methods(invalidate, listeners, strong):
 
     {listeners} {{p0, v0, p2}}, {LSS}->notifyLockSettingsStateListeners(ZI)V
 
-    # The guest lock's gatekeeper-password handle: Settings turns it into an enrollment token
-    # (change 7). No handle or token of the phone's gatekeeper exists behind it.
-    new-instance v7, {BUILDER}
-
-    invoke-direct {{v7}}, {BUILDER}-><init>()V
-
-    const-wide v0, 0x4f4e454f53L
-
-    invoke-virtual {{v7, v0, v1}}, {BUILDER}->setGatekeeperPasswordHandle(J){BUILDER}
-
-    move-result-object v7
-
-    invoke-virtual {{v7}}, {BUILDER}->build(){VCR}
-
-    move-result-object v7
+    # OK with no gatekeeper-password handle: Settings gets nothing to start a biometric
+    # enrollment with; the guest unlocks with the fingerprints and faces One UI enrolled.
+    sget-object v7, {VCR}->OK:{VCR}
 
     return-object v7
 
@@ -547,7 +513,6 @@ def patch_lss(lines, rel, pkg_text):
     s_i, s_end, s_locals = method(lines, "setLockCredentialInternal", f"({CRED}{CRED}IZ)Z", rel)
     v_i, v_end, v_locals = method(lines, "doVerifyCredential", f"({CRED}I{CALLBACK}I){VCR}", rel)
     t_i, t_end, t_locals = method(lines, "getCredentialType", "(I)I", rel)
-    g_i, _, g_locals = method(lines, "verifyGatekeeperPasswordHandle", f"(JJI){VCR}", rel)
     f_i, f_end, _ = method(lines, "enforceFrpNotActive", "()V", rel)
     inv_i, _, _ = method(lines, "invalidateCredentialTypeCaches", "(I)V", rel)
     lis_i, _, _ = method(lines, "notifyLockSettingsStateListeners", "(ZI)V", rel)
@@ -586,9 +551,6 @@ def patch_lss(lines, rel, pkg_text):
     # 4. The FRP check.
     f_at = entry(lines, f_i)
 
-    # 5. The handle of change 2, answered with a token at the entry.
-    g_at = entry(lines, g_i)
-
     edits = [
         (s_at, s_at, set_hook()),
         (v_at, v_at, verify_hook()),
@@ -596,8 +558,6 @@ def patch_lss(lines, rel, pkg_text):
         (t_code[-2][0] + 1, t_code[-2][0] + 1, front),
         (t_code[-1][0] + 1, t_code[-1][0] + 1, back),
         (f_at, f_at, FRP_HOOK),
-        (g_i + 1, g_i + 2, [f"    .locals {max(g_locals, 2)}"]),
-        (g_at, g_at, GK_HOOK),
     ]
     for first, last, new in sorted(edits, reverse=True):
         lines[first:last] = new
@@ -656,9 +616,14 @@ def main(root, helper):
         text = {rel: read(paths[rel]) for rel in dirs}
         helper_out = os.path.join(root, dirs[LSS_REL], PKG, HELPER_NAME)
 
-        have = [MARK in text[LSS_REL], KEYSTORE_TEXT in text[TMS_REL],
-                any(os.path.isfile(os.path.join(root, d, PKG, HELPER_NAME))
-                    for d in os.listdir(root) if d.startswith("smali"))]
+        helpers = [os.path.join(root, d, PKG, HELPER_NAME) for d in sorted(os.listdir(root))
+                   if d.startswith("smali") and os.path.isfile(os.path.join(root, d, PKG, HELPER_NAME))]
+        if (any(t in text[LSS_REL] for t in OLD_TOKEN)
+                or any(OLD_HELPER_TOKEN in read(h) for h in helpers)):
+            fail("this tree has the guest screen lock of an earlier guest_local_lock.py, which "
+                 "hands guest Settings a token to enroll a fingerprint or face; decode the "
+                 "image's own services.jar and patch that")
+        have = [MARK in text[LSS_REL], KEYSTORE_TEXT in text[TMS_REL], bool(helpers)]
         if all(have):
             print("guest_local_lock: this services.jar already has the guest screen lock",
                   file=sys.stderr)
