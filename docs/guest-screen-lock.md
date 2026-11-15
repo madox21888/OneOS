@@ -35,6 +35,11 @@ from pull request #152 by @vdcoolok.
   so "Add fingerprint" or "Add face" in the guest refuses or shows an error. (An earlier build
   handed guest Settings a token to enroll with; sets built from that version keep it until
   their `services_patched.jar` is built again.)
+  The guest cannot add or delete one either way: a request there to enroll or to remove a
+  fingerprint or a face ends with an error before it reaches the sensor, and One UI's
+  enrollments stay as they are (`switcher/patches/guest_no_biometric_writes.py`, in a set from
+  the next build of its `services_patched.jar` on; until then nothing in a guest's framework
+  stops "Delete fingerprint" in its Settings from removing One UI's).
 - **Not a device credential for apps.** An app that asks for the device PIN in its own prompt, or
   ties keys or passkeys to the screen lock, behaves as on a phone without a secure lock.
 - Nothing of it reaches the phone: no gatekeeper enrolment, no weaver slot, no auth token, no
