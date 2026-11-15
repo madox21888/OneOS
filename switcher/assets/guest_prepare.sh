@@ -69,8 +69,16 @@ no_symlink() { # <relative path under $STAGE/data>: refuse if any component is a
     IFS=$_oifs
 }
 for pair in $BRIDGES; do no_symlink "${pair#*:}"; done
+# system/users and system/users/0: One UI's enrollment files are carried into
+# that directory below with rm -f, cp, chown and chcon, and the settings are
+# seeded there. As a link to the host's /data/system/users, the rm -f of
+# settings_fingerprint*.xml would have deleted One UI's own list of its
+# fingerprints. The two face files are copied over what is there, and cp
+# writes through a link.
 for s in data misc misc/adb misc/profiles misc/user misc/bluedroid misc/bluetooth \
          misc_ce/0 misc_de/0 system system/devicestate system/package_cache \
+         system/users system/users/0 system/users/0/settings_face.xml \
+         system/users/0/face_enrolled_position_0.xml \
          system/watchdog_timestamps system_de system_ce user/0 user_de/0 \
          oneos_bin oneos_bin/busybox zygote_exec oplus oplus/multimedia \
          preapps-lib media/0 anr app local/tmp resource-cache oneos_fold8 oneos_pixel_hinge oneos_hinge; do
