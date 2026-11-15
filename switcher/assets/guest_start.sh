@@ -2825,14 +2825,40 @@ if [ -x "$FACEHAL_DIR/bin/hw/android.hardware.biometrics.face-service.facehal" ]
     echo "[Pivoted Root] facehal-rs: stopping One UI's face HAL"
     stop sec-biometrics-face-aidl 2>/dev/null || true
     sleep 1
+    # Kept running: the vendor's matcher runs inside this process, and a crash in it
+    # would leave the guest without any face HAL until the next switch (One UI's is
+    # stopped). Started again up to 5 times in a row; a run of a minute or more counts
+    # as healthy and clears the count. When it cannot be kept up, One UI's HAL is
+    # started again, so IFace/default is at least answered. return_to_oneui.sh kills
+    # this loop with the guest's other processes (by mount namespace).
+    : > /data/facehal.log
     (
-        export LD_LIBRARY_PATH="$FACEHAL_DIR:$FACEHAL_DIR/lib64"
+        export LD_LIBRARY_PATH="$FACEHAL_DIR/lib64"
         export FACEHAL_ALGORITHM_LIBRARY="$FACEHAL_DIR/lib64/libjni_stfaceunlock_api.so"
-        exec "$FACEHAL_DIR/bin/hw/android.hardware.biometrics.face-service.facehal"
-    ) </dev/null >/data/facehal.log 2>&1 &
+        n=0
+        while [ $n -lt 5 ]; do
+            t0=$(date +%s)
+            "$FACEHAL_DIR/bin/hw/android.hardware.biometrics.face-service.facehal" </dev/null >>/data/facehal.log 2>&1
+            rc=$?
+            t1=$(date +%s)
+            if [ $((t1 - t0)) -ge 60 ]; then n=0; else n=$((n + 1)); fi
+            echo "$(date '+%F %T') facehal-rs exited ($rc) after $((t1 - t0))s; start $n of 5 in a row" >>/data/facehal.log
+            sleep 2
+        done
+        echo "$(date '+%F %T') facehal-rs does not stay up: One UI's face HAL started again" >>/data/facehal.log
+        start sec-biometrics-face-aidl 2>/dev/null || true
+    ) </dev/null >/dev/null 2>&1 &
     echo $! >/data/facehal.pid
-    sleep 1
-    echo "[Pivoted Root] facehal-rs: $(service check android.hardware.biometrics.face.IFace/default 2>&1)"
+    # Up to 5 s for the registration; the framework asks for IFace/default as it boots.
+    fh_n=0
+    while [ $fh_n -lt 10 ] && ! service check android.hardware.biometrics.face.IFace/default 2>/dev/null | grep -q ": found"; do
+        fh_n=$((fh_n + 1)); sleep 0.5
+    done
+    if pidof android.hardware.biometrics.face-service.facehal >/dev/null 2>&1; then
+        echo "[Pivoted Root] facehal-rs: running; $(service check android.hardware.biometrics.face.IFace/default 2>&1)"
+    else
+        echo "!!! WARNING: facehal-rs is not running (see /data/facehal.log); it is retried, then One UI's face HAL is started again"
+    fi
 fi
 echo "[Pivoted Root] Launching guest Zygote & SystemServer via zygote_exec..."
 if [ -f /data/oneos_root/enabled ]; then

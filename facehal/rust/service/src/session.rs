@@ -1291,7 +1291,26 @@ fn notify_lockout_state(
     }
 }
 
+/// The token the guest's own screen lock hands out for a matched credential
+/// (switcher/patches/OneOSGuestLock.java, hat()): 69 zero bytes, which the framework
+/// parses into a token with every field zero and a 32-byte zero MAC. The guest lock is
+/// the only credential a guest has and no gatekeeper stands behind it, so this is what
+/// "the owner just entered the screen lock" looks like here. Without it setFeature and
+/// resetLockout could never succeed in a guest.
+fn is_guest_lock_token(hat: &HardwareAuthToken) -> bool {
+    hat.mac.len() == 32
+        && hat.mac.iter().all(|byte| *byte == 0)
+        && hat.challenge == 0
+        && hat.userId == 0
+        && hat.authenticatorId == 0
+        && hat.authenticatorType == HardwareAuthenticatorType::NONE
+        && hat.timestamp.milliSeconds == 0
+}
+
 fn credential_hat_is_structurally_valid(hat: &HardwareAuthToken) -> bool {
+    if is_guest_lock_token(hat) {
+        return true;
+    }
     if hat.mac.len() != 32
         || (hat.authenticatorType != HardwareAuthenticatorType::PASSWORD
             && hat.authenticatorType != HardwareAuthenticatorType::ANY)

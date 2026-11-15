@@ -8,13 +8,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAGIC: &[u8; 8] = b"FHALLOK1";
 const TIMED_LOCKOUT_EVERY: u32 = 5;
-const PERMANENT_LOCKOUT_AT: u32 = 20;
+// From this many failures in a row each further lockout is the long one. There is no
+// permanent lockout: a permanent one is cleared by resetLockout() after a credential
+// unlock, and the guest's own screen lock (patches/guest_local_lock.py) answers a
+// credential without the framework's biometric lockout reset, so nothing would ever
+// clear it and face unlock would stay off until lockout.bin was deleted by hand.
+const LONG_LOCKOUT_AT: u32 = 20;
 const TIMED_LOCKOUT_MILLIS: u64 = 30_000;
+const LONG_LOCKOUT_MILLIS: u64 = 5 * 60_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LockoutState {
     None,
     Timed { remaining_millis: u64 },
+    /// Never produced any more (see LONG_LOCKOUT_AT); kept for the callers' match arms.
     Permanent,
 }
 
@@ -54,7 +61,15 @@ impl LockoutTracker {
     pub fn status(&self) -> Result<LockoutState, FaceError> {
         let mut record = self.record.lock().unwrap();
         let now = now_millis()?;
-        let maximum_timed_until = now.saturating_add(TIMED_LOCKOUT_MILLIS);
+        // A record from a build that still had the permanent lockout: one long wait instead.
+        if record.permanent {
+            record.permanent = false;
+            record.timed_until_millis = now.saturating_add(LONG_LOCKOUT_MILLIS);
+            self.persist(*record)?;
+        }
+        // A deadline further away than the wait that belongs to the count (the clock was
+        // set back) is cut to that wait.
+        let maximum_timed_until = now.saturating_add(lockout_millis(record.failed_attempts));
         if !record.permanent && record.timed_until_millis > maximum_timed_until {
             record.timed_until_millis = maximum_timed_until;
             self.persist(*record)?;
@@ -71,11 +86,10 @@ impl LockoutTracker {
         let mut record = self.record.lock().unwrap();
         let now = now_millis()?;
         record.failed_attempts = record.failed_attempts.saturating_add(1);
-        if record.failed_attempts >= PERMANENT_LOCKOUT_AT {
-            record.permanent = true;
-            record.timed_until_millis = 0;
-        } else if record.failed_attempts % TIMED_LOCKOUT_EVERY == 0 {
-            record.timed_until_millis = now.saturating_add(TIMED_LOCKOUT_MILLIS);
+        record.permanent = false;
+        if record.failed_attempts % TIMED_LOCKOUT_EVERY == 0 {
+            record.timed_until_millis =
+                now.saturating_add(lockout_millis(record.failed_attempts));
         }
         self.persist(*record)?;
         Ok(state_for(*record, now))
@@ -135,6 +149,15 @@ fn read_record(path: &Path) -> Result<LockoutRecord, FaceError> {
         timed_until_millis,
         permanent,
     })
+}
+
+/// The wait after the given number of failures in a row.
+fn lockout_millis(failed_attempts: u32) -> u64 {
+    if failed_attempts >= LONG_LOCKOUT_AT {
+        LONG_LOCKOUT_MILLIS
+    } else {
+        TIMED_LOCKOUT_MILLIS
+    }
 }
 
 fn state_for(record: LockoutRecord, now: u64) -> LockoutState {
@@ -200,18 +223,46 @@ mod tests {
     }
 
     #[test]
-    fn twentieth_failure_is_permanent() {
+    fn twentieth_failure_is_a_long_wait_not_permanent() {
         let root = temp_root();
         let tracker = LockoutTracker::new(&root, 10).unwrap();
         for _ in 0..19 {
             tracker.record_failure().unwrap();
         }
-        assert_eq!(tracker.record_failure().unwrap(), LockoutState::Permanent);
+        match tracker.record_failure().unwrap() {
+            LockoutState::Timed { remaining_millis } => {
+                assert!(remaining_millis > TIMED_LOCKOUT_MILLIS);
+                assert!(remaining_millis <= LONG_LOCKOUT_MILLIS);
+            }
+            other => panic!("unexpected state {other:?}"),
+        }
         drop(tracker);
-        assert_eq!(
+        assert!(matches!(
             LockoutTracker::new(&root, 10).unwrap().status().unwrap(),
-            LockoutState::Permanent
-        );
+            LockoutState::Timed { .. }
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn permanent_record_of_an_older_build_becomes_a_wait() {
+        let root = temp_root();
+        let tracker = LockoutTracker::new(&root, 0).unwrap();
+        tracker
+            .persist(LockoutRecord {
+                failed_attempts: 20,
+                timed_until_millis: 0,
+                permanent: true,
+            })
+            .unwrap();
+        drop(tracker);
+        let tracker = LockoutTracker::new(&root, 0).unwrap();
+        assert!(matches!(
+            tracker.status().unwrap(),
+            LockoutState::Timed { .. }
+        ));
+        tracker.record_success().unwrap();
+        assert_eq!(tracker.status().unwrap(), LockoutState::None);
         fs::remove_dir_all(root).unwrap();
     }
 }
