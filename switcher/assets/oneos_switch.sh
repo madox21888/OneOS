@@ -199,6 +199,12 @@ case "${ONEOS_HEAT_CAP:-1}" in 0|1) ;; *) refuse "ONEOS_HEAT_CAP=$ONEOS_HEAT_CAP
 case "${ONEOS_FULL_LOGS:-1}" in 0|1) ;; *) refuse "ONEOS_FULL_LOGS=$ONEOS_FULL_LOGS (0 or 1)" ;; esac
 [ "${ONEOS_GUEST_GMS:-1}" = 1 ] && [ "${ONEOS_GUEST_HIDE_GMS:-0}" = 1 ] && [ -f "$STAGE/gmssystem_payload.img" ] &&
     refuse "ONEOS_GUEST_GMS is on (the default) with gmssystem_payload.img staged, and ONEOS_GUEST_HIDE_GMS=1 hides Google services: set one of them to 0"
+# facehal-rs in a HyperOS guest (guest_prepare.sh, guest_start.sh): 0 or 1,
+# unset meaning 0. It enrolls a face inside the guest, which the fork's rule
+# leaves to One UI, so only the adb loop can ask for it: the app's session.env
+# has no such key and oneos_root.sh unsets every other ONEOS_* variable. Both
+# scripts inherit this environment and take only 1 as on.
+case "${ONEOS_GUEST_FACEHAL:-0}" in 0|1) ;; *) refuse "ONEOS_GUEST_FACEHAL=$ONEOS_GUEST_FACEHAL (0 or 1)" ;; esac
 # The same guard and app-id checks as guest_prepare.sh, here so a refusal comes
 # before One UI's framework stops (after it, guest_prepare's exit 3 reboots).
 if [ "${ONEOS_GUEST_GMS:-1}" = 1 ] && [ -f "$STAGE/gmssystem_payload.img" ]; then

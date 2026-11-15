@@ -27,8 +27,14 @@ from pull request #152 by @vdcoolok.
 - **Not protection for the data.** A restart of the phone always lands in One UI, which has no
   screen lock while OneOS is in use; with root there, the guest's files and the lock record are
   within reach. The guest's storage is not encrypted with this lock.
-- **No fingerprint or face.** Enrolling them needs a token from the phone's gatekeeper, which the
-  guest lock cannot and must not get. "Add fingerprint" in the guest refuses or shows an error.
+- **No fingerprint or face of the guest's own.** Fingerprints and faces are enrolled in One UI
+  only; no fingerprint or face is enrolled in the guest. It uses One UI's: `guest_prepare.sh`
+  carries One UI's enrollment list into the guest at every switch, the templates stay in the
+  phone's secure hardware, and the guest unlocks with them through the phone's own fingerprint
+  and face services. A match of the guest lock answers with no gatekeeper handle and no token,
+  so "Add fingerprint" or "Add face" in the guest refuses or shows an error. (An earlier build
+  handed guest Settings a token to enroll with; sets built from that version keep it until
+  their `services_patched.jar` is built again.)
 - **Not a device credential for apps.** An app that asks for the device PIN in its own prompt, or
   ties keys or passkeys to the screen lock, behaves as on a phone without a secure lock.
 - Nothing of it reaches the phone: no gatekeeper enrolment, no weaver slot, no auth token, no
