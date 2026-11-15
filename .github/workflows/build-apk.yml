@@ -1,0 +1,109 @@
+# Builds a debug APK of the OneOS app. CI is where the app gets built because
+# its One UI libraries (io.github.tribalfs:oneui-design and tribalfs' sesl
+# forks) are only on GitHub Packages, which needs a GitHub token. Debug only:
+# the release keystore stays on the owner's machine.
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["work/**", "ci/**"]
+    paths:
+      - "app-android/**"
+      - "switcher/**"
+      - "scripts/**"
+      - ".github/workflows/build-apk.yml"
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      # The build reads no git metadata (versionName/versionCode are literals in
+      # app/build.gradle.kts), so a shallow clone is enough.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # jvmToolchain = "21" (gradle/libs.versions.toml) and gradle.properties
+      # forbids toolchain auto-download, so JDK 21 must be on the runner.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: android-actions/setup-android@v3
+
+      # compileSdk 37, and the build-tools AGP 9.4.1 defaults to.
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install "platforms;android-37.0" "build-tools;36.0.0" "platform-tools"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # :app refuses to run its staging task without the git-ignored
+      # switcher/assets/guest_manager.apk, so stage it first.
+      - name: Build guest manager
+        env:
+          # settings.gradle.kts reads these when ~/.config/twidget/github.properties
+          # is absent. The workflow token with packages:read should read
+          # tribalfs' public packages; if maven.pkg.github.com refuses it, add a
+          # repository secret GH_PACKAGES_TOKEN (classic PAT with read:packages)
+          # and, if its owner is not the actor, a variable GH_PACKAGES_USER.
+          GH_PACKAGES_USER: ${{ vars.GH_PACKAGES_USER || github.actor }}
+          GH_PACKAGES_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
+        run: sh scripts/build-guest-manager.sh --debug
+
+      # No -Poneos.series / -Poneos.packSets: the APK carries the session
+      # scripts and each set's lists only, so no out/ set directories are needed.
+      # assembleFullDebug also runs checkFullDebugStagingApk (python3, preinstalled).
+      - name: Build app
+        working-directory: app-android
+        env:
+          GH_PACKAGES_USER: ${{ vars.GH_PACKAGES_USER || github.actor }}
+          GH_PACKAGES_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
+        run: ./gradlew --console=plain :app:assembleFullDebug
+
+      - name: Hash APK and write summary
+        id: apk
+        run: |
+          set -eu
+          dir=app-android/app/build/outputs/apk/full/debug
+          set -- "$dir"/*.apk
+          apk=$1
+          name=$(basename "$apk")
+          sha=$(sha256sum "$apk" | cut -d' ' -f1)
+          echo "$sha  $name" > "$apk.sha256"
+          badging=$("$ANDROID_HOME/build-tools/36.0.0/aapt2" dump badging "$apk" | head -n 1)
+          vname=$(printf '%s\n' "$badging" | sed -n "s/.* versionName='\([^']*\)'.*/\1/p")
+          vcode=$(printf '%s\n' "$badging" | sed -n "s/.* versionCode='\([^']*\)'.*/\1/p")
+          echo "short_sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          {
+            echo "### OneOS debug APK"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| versionName | \`$vname\` |"
+            echo "| versionCode | \`$vcode\` |"
+            echo "| file | \`$name\` |"
+            echo "| sha256 | \`$sha\` |"
+            echo ""
+            echo "Debug-signed with the runner's key: it cannot be installed over an app signed with the original key."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oneos-full-debug-${{ steps.apk.outputs.short_sha }}
+          path: |
+            app-android/app/build/outputs/apk/full/debug/*.apk
+            app-android/app/build/outputs/apk/full/debug/*.apk.sha256
+          if-no-files-found: error
